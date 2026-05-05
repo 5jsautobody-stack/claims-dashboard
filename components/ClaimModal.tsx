@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useRef, useEffect } from 'react'
-import { supabase, type Claim, type TowType, type TowCoverage, type EventLog } from '@/lib/supabase'
+import { supabase, type Claim, type TowType, type TowCoverage, type EventLog, type EstimateLineItem } from '@/lib/supabase'
 
 type FormData = Omit<Claim, 'id' | 'created_at' | 'updated_at'>
 
@@ -11,12 +11,14 @@ const empty: FormData = {
   customer: '', est_amount: '', deductible: '', paid: '', date_in: '', date_eta: '',
   progress: 0, tech: '', notes: '', file_name: '', file_url: '',
   tow_type: 'none', tow_coverage: '', tow_amount: '', tow_company: '',
-  events_log: '[]', payments: '[]',
+  events_log: '[]', payments: '[]', estimate_lines: '[]',
 }
 
 function makeEvent(type: EventLog['type'], label: string, detail?: string): EventLog {
   return { id: Date.now().toString(), type, label, detail, timestamp: new Date().toISOString() }
 }
+
+function parseMoney(v: string) { return parseFloat((v || '0').replace(/[^0-9.]/g, '')) || 0 }
 
 export default function ClaimModal({ claim, onClose, onSaved, existingClaims }: {
   claim: Claim | null; onClose: () => void; onSaved: () => void; existingClaims: Claim[]
@@ -28,6 +30,9 @@ export default function ClaimModal({ claim, onClose, onSaved, existingClaims }: 
   const [aiFilled, setAiFilled] = useState(false)
   const [aiError, setAiError] = useState('')
   const [error, setError] = useState('')
+  const [estimateLines, setEstimateLines] = useState<EstimateLineItem[]>(() => {
+    try { return JSON.parse(claim?.estimate_lines || '[]') } catch { return [] }
+  })
   const [isSupplementDetected, setIsSupplementDetected] = useState(false)
   const [supplementNumber, setSupplementNumber] = useState('')
   const [supplementAmount, setSupplementAmount] = useState('')
@@ -44,6 +49,14 @@ export default function ClaimModal({ claim, onClose, onSaved, existingClaims }: 
   }, [onClose])
 
   const set = (k: keyof FormData, v: string | number) => setForm(f => ({ ...f, [k]: v }))
+
+  // Recalculate est_amount whenever estimateLines changes
+  useEffect(() => {
+    if (estimateLines.length > 0) {
+      const total = estimateLines.reduce((sum, l) => sum + parseMoney(l.amount), 0)
+      set('est_amount', total > 0 ? '$' + total.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '')
+    }
+  }, [estimateLines])
 
   const findMatchingClaims = (fields: Record<string, string>) =>
     existingClaims.filter(c =>
@@ -72,6 +85,22 @@ export default function ClaimModal({ claim, onClose, onSaved, existingClaims }: 
       const data = await res.json()
       if (!res.ok || data.error) { setAiError(data.error || 'Could not read estimate.'); setParsing(false); return }
       const fields = data.fields
+
+      // Build estimate lines from breakdown
+      const breakdown: { label: string; amount: string; date: string }[] = fields.estimate_breakdown || []
+      if (breakdown.length > 0) {
+        const lines: EstimateLineItem[] = breakdown.map((b, i) => ({
+          id: (Date.now() + i).toString(),
+          label: b.label || `Item ${i + 1}`,
+          amount: b.amount || '',
+          date: b.date || '',
+          file_name: f.name,
+          file_url: '',
+          timestamp: new Date().toISOString(),
+        }))
+        setEstimateLines(lines)
+      }
+
       if (fields.is_supplement === true) {
         setIsSupplementDetected(true)
         setSupplementNumber(fields.supplement_number || '')
@@ -109,6 +138,7 @@ export default function ClaimModal({ claim, onClose, onSaved, existingClaims }: 
     setSaving(true); setError('')
     const targetClaim = existingClaims.find(c => c.id === selectedClaimId)
     if (!targetClaim) { setError('Could not find the selected claim.'); setSaving(false); return }
+
     let fileUrl = targetClaim.file_url, fileName = targetClaim.file_name
     if (file) {
       const ext = file.name.split('.').pop()
@@ -118,23 +148,38 @@ export default function ClaimModal({ claim, onClose, onSaved, existingClaims }: 
       const { data } = supabase.storage.from('estimates').getPublicUrl(path)
       fileUrl = data.publicUrl; fileName = file.name
     }
-    const existingAmt = parseFloat((targetClaim.est_amount || '0').replace(/[^0-9.]/g, '')) || 0
-    const suppAmt = parseFloat((supplementAmount || '0').replace(/[^0-9.]/g, '')) || 0
-    const newTotal = existingAmt + suppAmt
+
+    // Add new supplement lines to existing estimate lines
+    const existingLines: EstimateLineItem[] = JSON.parse(targetClaim.estimate_lines || '[]')
+    const newLines = estimateLines.map(l => ({ ...l, file_name: fileName, file_url: fileUrl }))
+    // Filter out any lines from new doc that duplicate existing labels
+    const mergedLines = [...existingLines]
+    for (const nl of newLines) {
+      if (!mergedLines.find(el => el.label.toLowerCase() === nl.label.toLowerCase())) {
+        mergedLines.push(nl)
+      }
+    }
+
+    // Recalculate total
+    const newTotal = mergedLines.reduce((s, l) => s + parseMoney(l.amount), 0)
     const newTotalStr = '$' + newTotal.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
     const suppLabel = supplementNumber ? `Supplement #${supplementNumber}` : 'Supplement'
     const suppNote = `${suppLabel} added: ${supplementAmount || 'amount unknown'}. New total: ${newTotalStr}.`
     const newNotes = targetClaim.notes ? `${targetClaim.notes}\n\n${suppNote}` : suppNote
     const existingEvents: EventLog[] = JSON.parse(targetClaim.events_log || '[]')
     const newEvent = makeEvent('supplement', `${suppLabel} received`, `Amount: ${supplementAmount || 'unknown'} → New total: ${newTotalStr}`)
+
     const updates: Partial<Claim> = {
       est_amount: newTotalStr, status: 'supplement', notes: newNotes,
       file_name: fileName, file_url: fileUrl,
+      estimate_lines: JSON.stringify(mergedLines),
       events_log: JSON.stringify([...existingEvents, newEvent]),
     }
     if (form.adjuster) updates.adjuster = form.adjuster
     if (form.adj_phone) updates.adj_phone = form.adj_phone
     if (form.adj_email) updates.adj_email = form.adj_email
+
     const { error: e } = await supabase.from('claims').update(updates).eq('id', selectedClaimId)
     if (e) { setError(e.message); setSaving(false); return }
     setSaving(false); onSaved()
@@ -152,6 +197,10 @@ export default function ClaimModal({ claim, onClose, onSaved, existingClaims }: 
       const { data } = supabase.storage.from('estimates').getPublicUrl(path)
       fileName = file.name; fileUrl = data.publicUrl
     }
+
+    // Update file urls in estimate lines
+    const updatedLines = estimateLines.map(l => ({ ...l, file_url: fileUrl || l.file_url, file_name: fileName || l.file_name }))
+
     let eventsLog = form.events_log || '[]'
     if (!claim) {
       const arrivedDetail = form.tow_type === 'us'
@@ -161,7 +210,8 @@ export default function ClaimModal({ claim, onClose, onSaved, existingClaims }: 
         : 'Drove in'
       eventsLog = JSON.stringify([makeEvent('arrived', 'Vehicle arrived at shop', arrivedDetail)])
     }
-    const payload = { ...form, file_name: fileName, file_url: fileUrl, events_log: eventsLog }
+
+    const payload = { ...form, file_name: fileName, file_url: fileUrl, events_log: eventsLog, estimate_lines: JSON.stringify(updatedLines) }
     if (claim) {
       const { error: e } = await supabase.from('claims').update(payload).eq('id', claim.id)
       if (e) { setError(e.message); setSaving(false); return }
@@ -171,6 +221,12 @@ export default function ClaimModal({ claim, onClose, onSaved, existingClaims }: 
     }
     setSaving(false); onSaved()
   }
+
+  // Compute live balance
+  const estAmt = parseMoney(form.est_amount)
+  const paidAmt = parseMoney(form.paid)
+  const balAmt = Math.max(0, estAmt - paidAmt)
+  const balStr = balAmt > 0 ? '$' + balAmt.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'
 
   return (
     <div ref={overlayRef} className="fixed inset-0 bg-black/50 z-50 flex items-start justify-center p-4 overflow-y-auto"
@@ -193,7 +249,7 @@ export default function ClaimModal({ claim, onClose, onSaved, existingClaims }: 
 
           {/* Upload zone */}
           <div>
-            <label className="form-label">Estimate file <span className="ml-1 normal-case text-blue-500 font-normal text-xs">AI auto-fills · detects supplements</span></label>
+            <label className="form-label">Estimate file <span className="ml-1 normal-case text-blue-500 font-normal text-xs">AI scans all estimates & supplements</span></label>
             <div className={`border-2 border-dashed rounded-xl p-5 text-center cursor-pointer transition-all ${parsing ? 'border-blue-300 bg-blue-50' : isSupplementDetected ? 'border-orange-300 bg-orange-50' : aiFilled ? 'border-green-300 bg-green-50' : file ? 'border-green-300 bg-green-50' : 'border-gray-200 hover:border-blue-300 bg-gray-50 hover:bg-blue-50'}`}
               onClick={() => !parsing && fileRef.current?.click()}
               onDragOver={e => e.preventDefault()}
@@ -201,8 +257,8 @@ export default function ClaimModal({ claim, onClose, onSaved, existingClaims }: 
               {parsing ? (
                 <div className="flex flex-col items-center gap-2 py-1">
                   <div className="w-6 h-6 border-2 border-blue-200 border-t-blue-600 rounded-full animate-spin"/>
-                  <p className="text-sm text-blue-600 font-medium">Reading document with AI...</p>
-                  <p className="text-xs text-blue-400">Takes about 10 seconds</p>
+                  <p className="text-sm text-blue-600 font-medium">Scanning entire document for all amounts...</p>
+                  <p className="text-xs text-blue-400">Reads original estimate + all supplements</p>
                 </div>
               ) : isSupplementDetected ? (
                 <div className="flex flex-col items-center gap-1">
@@ -210,29 +266,29 @@ export default function ClaimModal({ claim, onClose, onSaved, existingClaims }: 
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
                     Supplement{supplementNumber ? ` #${supplementNumber}` : ''} detected!
                   </div>
-                  <p className="text-xs text-gray-500 mt-0.5">Amount: <strong>{supplementAmount || 'unknown'}</strong> · {file?.name} <span className="ml-1 cursor-pointer text-blue-400 hover:underline" onClick={e => { e.stopPropagation(); setFile(null); set('file_name',''); set('file_url',''); setIsSupplementDetected(false); setSupplementMode(null) }}>Change</span></p>
+                  <p className="text-xs text-gray-500 mt-0.5">{file?.name} <span className="ml-1 cursor-pointer text-blue-400 hover:underline" onClick={e => { e.stopPropagation(); setFile(null); set('file_name',''); set('file_url',''); setIsSupplementDetected(false); setSupplementMode(null); setEstimateLines([]) }}>Change</span></p>
                 </div>
               ) : aiFilled ? (
                 <div className="flex flex-col items-center gap-1">
                   <div className="flex items-center gap-2 text-green-700 font-medium text-sm">
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                    Fields filled from estimate!
+                    Document scanned — {estimateLines.length} amount{estimateLines.length !== 1 ? 's' : ''} found
                   </div>
-                  <p className="text-xs text-gray-400 mt-0.5">{file?.name} · <span className="cursor-pointer text-blue-400 hover:underline" onClick={e => { e.stopPropagation(); setFile(null); set('file_name',''); set('file_url',''); setAiFilled(false) }}>Change file</span></p>
+                  <p className="text-xs text-gray-400 mt-0.5">{file?.name} · <span className="cursor-pointer text-blue-400 hover:underline" onClick={e => { e.stopPropagation(); setFile(null); set('file_name',''); set('file_url',''); setAiFilled(false); setEstimateLines([]) }}>Change file</span></p>
                 </div>
               ) : file ? (
                 <div className="flex items-center justify-center gap-2 text-sm text-green-700 font-medium">
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-                  {file.name} <button className="ml-1 text-gray-400 hover:text-gray-600" onClick={e => { e.stopPropagation(); setFile(null); set('file_name',''); set('file_url','') }}>✕</button>
+                  {file.name} <button className="ml-1 text-gray-400 hover:text-gray-600" onClick={e => { e.stopPropagation(); setFile(null); set('file_name',''); set('file_url',''); setEstimateLines([]) }}>✕</button>
                 </div>
               ) : (
                 <>
                   <svg className="w-8 h-8 text-gray-300 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={1.5}><path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"/></svg>
                   <p className="text-sm font-medium text-gray-600">Drop estimate or supplement PDF here</p>
-                  <p className="text-xs text-gray-400 mt-1">PDF, JPG, PNG — AI reads it and fills the form</p>
+                  <p className="text-xs text-gray-400 mt-1">AI scans the full document for all estimate & supplement amounts</p>
                   <div className="inline-flex items-center gap-1.5 mt-3 bg-blue-100 text-blue-700 text-xs font-medium px-3 py-1.5 rounded-full">
                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/></svg>
-                    Auto-fill with AI · Supplement detection
+                    Full document scan · Detects all supplements
                   </div>
                 </>
               )}
@@ -266,7 +322,7 @@ export default function ClaimModal({ claim, onClose, onSaved, existingClaims }: 
                   {matchedClaims.map(c => (
                     <label key={c.id} className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer ${selectedClaimId === c.id ? 'border-orange-400 bg-orange-100' : 'border-gray-200 bg-white hover:bg-gray-50'}`}>
                       <input type="radio" name="claimSelect" value={c.id} checked={selectedClaimId === c.id} onChange={() => setSelectedClaimId(c.id)} className="mt-0.5"/>
-                      <div><p className="text-sm font-medium text-gray-900">{c.vehicle || 'No vehicle'}</p><p className="text-xs text-gray-500">{c.claim_num ? `#${c.claim_num} · ` : ''}{c.insurance} · Current: {c.est_amount || '—'}</p></div>
+                      <div><p className="text-sm font-medium text-gray-900">{c.vehicle || 'No vehicle'}</p><p className="text-xs text-gray-500">{c.claim_num ? `#${c.claim_num} · ` : ''}{c.insurance} · Current total: {c.est_amount || '—'}</p></div>
                     </label>
                   ))}
                 </div>
@@ -278,25 +334,38 @@ export default function ClaimModal({ claim, onClose, onSaved, existingClaims }: 
                   {existingClaims.map(c => <option key={c.id} value={c.id}>{c.vehicle || 'No vehicle'}{c.claim_num ? ` · #${c.claim_num}` : ''}{c.est_amount ? ` · ${c.est_amount}` : ''}</option>)}
                 </select>
               </div>
-              <div>
-                <label className="form-label">Supplement amount</label>
-                <input className="form-input" placeholder="$0.00" value={supplementAmount} onChange={e => setSupplementAmount(e.target.value)}/>
-              </div>
-              {selectedClaimId && (() => {
-                const t = existingClaims.find(c => c.id === selectedClaimId)
-                if (!t) return null
-                const e = parseFloat((t.est_amount || '0').replace(/[^0-9.]/g, '')) || 0
-                const s = parseFloat((supplementAmount || '0').replace(/[^0-9.]/g, '')) || 0
-                return (
-                  <div className="bg-white border border-orange-200 rounded-lg p-3 text-xs space-y-1">
-                    <p className="font-medium text-gray-700">Summary of changes:</p>
-                    <p className="text-gray-500">Current estimate: <strong className="text-gray-800">{t.est_amount || '—'}</strong></p>
-                    <p className="text-gray-500">+ Supplement: <strong className="text-gray-800">{supplementAmount || '—'}</strong></p>
-                    <p className="text-orange-700 font-semibold">= New total: ${(e+s).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</p>
-                    <p className="text-gray-400">Status → Supplement needed · Event logged automatically</p>
-                  </div>
-                )
-              })()}
+
+              {/* Show what will be added */}
+              {estimateLines.length > 0 && (
+                <div className="bg-white border border-orange-200 rounded-lg p-3 space-y-1.5">
+                  <p className="text-xs font-semibold text-gray-700">Amounts being added:</p>
+                  {estimateLines.map((l, i) => (
+                    <div key={i} className="flex justify-between text-xs">
+                      <span className="text-gray-600">{l.label}</span>
+                      <span className="font-medium text-gray-900">{l.amount}</span>
+                    </div>
+                  ))}
+                  {selectedClaimId && (() => {
+                    const t = existingClaims.find(c => c.id === selectedClaimId)
+                    if (!t) return null
+                    const existing = parseMoney(t.est_amount)
+                    const adding = estimateLines.reduce((s, l) => s + parseMoney(l.amount), 0)
+                    const newTotal = existing + adding
+                    return (
+                      <>
+                        <div className="border-t border-gray-100 pt-1.5 flex justify-between text-xs">
+                          <span className="text-gray-500">Current total</span>
+                          <span className="text-gray-700">{t.est_amount || '—'}</span>
+                        </div>
+                        <div className="flex justify-between text-xs font-semibold text-orange-700">
+                          <span>New total</span>
+                          <span>${newTotal.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})}</span>
+                        </div>
+                      </>
+                    )
+                  })()}
+                </div>
+              )}
             </div>
           )}
 
@@ -304,6 +373,7 @@ export default function ClaimModal({ claim, onClose, onSaved, existingClaims }: 
           {supplementMode !== 'link' && (
             <>
               {aiFilled && <p className="text-xs text-gray-400">Review fields below and correct anything before saving.</p>}
+
               <div className="grid grid-cols-2 gap-3">
                 <div><label className="form-label">Claim number</label><input className="form-input" placeholder="CLM-2024-001" value={form.claim_num} onChange={e => set('claim_num', e.target.value)}/></div>
                 <div><label className="form-label">Status</label>
@@ -331,33 +401,71 @@ export default function ClaimModal({ claim, onClose, onSaved, existingClaims }: 
                 <div><label className="form-label">Customer contact</label><input className="form-input" placeholder="Name & phone" value={form.customer} onChange={e => set('customer', e.target.value)}/></div>
               </div>
 
-              {/* ── FINANCIALS ── */}
+              {/* Financials */}
               <div className="bg-gray-50 border border-gray-200 rounded-xl p-4 space-y-3">
                 <p className="text-xs font-semibold text-gray-700 uppercase tracking-wide">Financials</p>
-                <div className="grid grid-cols-2 gap-3">
-                  <div><label className="form-label">Estimate amount</label><input className="form-input" placeholder="$0.00" value={form.est_amount} onChange={e => set('est_amount', e.target.value)}/></div>
-                  <div>
-                    <label className="form-label flex items-center gap-1">
-                      Deductible
-                      <span className="normal-case font-normal text-gray-400 text-xs">(owed by customer)</span>
-                    </label>
-                    <input className="form-input" placeholder="$0.00" value={form.deductible} onChange={e => set('deductible', e.target.value)}/>
-                  </div>
-                </div>
-                <div className="grid grid-cols-2 gap-3">
-                  <div><label className="form-label">Paid / approved by insurance</label><input className="form-input" placeholder="$0.00" value={form.paid} onChange={e => set('paid', e.target.value)}/></div>
-                  <div>
-                    <label className="form-label">Balance owed</label>
-                    <div className="form-input bg-white text-gray-700 font-medium cursor-default">
-                      {(() => {
-                        const est = parseFloat((form.est_amount || '0').replace(/[^0-9.]/g,'')) || 0
-                        const paid = parseFloat((form.paid || '0').replace(/[^0-9.]/g,'')) || 0
-                        const bal = Math.max(0, est - paid)
-                        return bal > 0 ? '$' + bal.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—'
-                      })()}
+
+                {/* Estimate breakdown lines */}
+                {estimateLines.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-xs text-gray-500 font-medium">Estimate breakdown (from document scan):</p>
+                    {estimateLines.map((line, i) => (
+                      <div key={line.id} className="flex items-center gap-2">
+                        <div className="flex-1 grid grid-cols-2 gap-2">
+                          <input className="form-input text-xs" value={line.label} onChange={e => {
+                            const updated = [...estimateLines]; updated[i] = { ...updated[i], label: e.target.value }; setEstimateLines(updated)
+                          }}/>
+                          <input className="form-input text-xs" placeholder="$0.00" value={line.amount} onChange={e => {
+                            const updated = [...estimateLines]; updated[i] = { ...updated[i], amount: e.target.value }; setEstimateLines(updated)
+                          }}/>
+                        </div>
+                        <button className="text-gray-300 hover:text-red-400 flex-shrink-0" onClick={() => setEstimateLines(lines => lines.filter((_, j) => j !== i))}>
+                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12"/></svg>
+                        </button>
+                      </div>
+                    ))}
+                    <button className="text-xs text-blue-500 hover:text-blue-700 flex items-center gap-1" onClick={() => setEstimateLines(l => [...l, { id: Date.now().toString(), label: `Supplement #${l.length}`, amount: '', date: '', file_name: '', file_url: '', timestamp: new Date().toISOString() }])}>
+                      <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}><path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4"/></svg>
+                      Add line
+                    </button>
+                    <div className="border-t border-gray-200 pt-2 flex justify-between text-sm font-semibold text-gray-900">
+                      <span>Total</span>
+                      <span>{form.est_amount || '—'}</span>
                     </div>
                   </div>
+                )}
+
+                {estimateLines.length === 0 && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div>
+                      <label className="form-label">Estimate amount</label>
+                      <input className="form-input" placeholder="$0.00" value={form.est_amount} onChange={e => set('est_amount', e.target.value)}/>
+                    </div>
+                    <div>
+                      <label className="form-label">Deductible <span className="normal-case font-normal text-gray-400 text-xs">(from customer)</span></label>
+                      <input className="form-input" placeholder="$0.00" value={form.deductible} onChange={e => set('deductible', e.target.value)}/>
+                    </div>
+                  </div>
+                )}
+
+                {estimateLines.length > 0 && (
+                  <div>
+                    <label className="form-label">Deductible <span className="normal-case font-normal text-gray-400 text-xs">(from customer)</span></label>
+                    <input className="form-input" placeholder="$0.00" value={form.deductible} onChange={e => set('deductible', e.target.value)}/>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="form-label">Paid / approved by insurance</label>
+                    <input className="form-input" placeholder="$0.00" value={form.paid} onChange={e => set('paid', e.target.value)}/>
+                  </div>
+                  <div>
+                    <label className="form-label">Balance owed</label>
+                    <div className={`form-input bg-white font-medium cursor-default ${balAmt > 0 ? 'text-red-600' : 'text-gray-400'}`}>{balStr}</div>
+                  </div>
                 </div>
+
                 {form.deductible && (
                   <div className="bg-yellow-50 border border-yellow-200 rounded-lg px-3 py-2 text-xs text-yellow-800">
                     💰 Deductible of <strong>{form.deductible}</strong> to be collected from customer at pickup
@@ -433,7 +541,7 @@ export default function ClaimModal({ claim, onClose, onSaved, existingClaims }: 
           ) : (
             <button className="btn btn-primary min-w-28 justify-center" onClick={handleSave} disabled={saving || parsing}>
               {saving ? <span className="flex items-center gap-2"><svg className="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg>Saving...</span>
-              : parsing ? 'Reading...' : claim ? 'Save changes' : 'Add claim'}
+              : parsing ? 'Scanning...' : claim ? 'Save changes' : 'Add claim'}
             </button>
           )}
         </div>
