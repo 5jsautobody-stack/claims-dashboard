@@ -59,7 +59,7 @@ export default function ClaimsDashboard() {
           <div className="flex items-center gap-3">
             <div className="w-8 h-8 bg-gray-900 rounded-lg flex items-center justify-center">
               <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                <path strokeLinecap="round" strokeLinejoin="round" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
               </svg>
             </div>
             <div>
@@ -69,7 +69,7 @@ export default function ClaimsDashboard() {
           </div>
           <button onClick={openNew} className="btn btn-primary text-xs sm:text-sm py-1.5 px-3 sm:py-2 sm:px-4">
             <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2.5}>
-              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
+              <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4"/>
             </svg>
             <span className="hidden sm:inline">New claim</span>
             <span className="sm:hidden">New</span>
@@ -79,13 +79,12 @@ export default function ClaimsDashboard() {
 
       <main className="max-w-5xl mx-auto px-4 sm:px-6 py-6 space-y-5">
         <StatsBar claims={claims} />
-
         <div className="flex flex-col sm:flex-row gap-3">
           <div className="relative flex-1">
             <svg className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" fill="none" stroke="currentColor" viewBox="0 0 24 24" strokeWidth={2}>
               <circle cx="11" cy="11" r="8"/><path strokeLinecap="round" d="m21 21-4.35-4.35"/>
             </svg>
-            <input className="form-input pl-9" placeholder="Search vehicle, claim #, insurance, customer..." value={search} onChange={e => setSearch(e.target.value)} />
+            <input className="form-input pl-9" placeholder="Search vehicle, claim #, insurance, customer..." value={search} onChange={e => setSearch(e.target.value)}/>
           </div>
           <select className="form-input sm:w-44" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
             <option value="all">All statuses</option>
@@ -98,7 +97,7 @@ export default function ClaimsDashboard() {
 
         {loading ? (
           <div className="flex items-center justify-center py-16">
-            <div className="w-6 h-6 border-2 border-gray-200 border-t-gray-800 rounded-full animate-spin" />
+            <div className="w-6 h-6 border-2 border-gray-200 border-t-gray-800 rounded-full animate-spin"/>
           </div>
         ) : filtered.length === 0 ? (
           <div className="card p-12 text-center">
@@ -123,7 +122,12 @@ export default function ClaimsDashboard() {
       </main>
 
       {modalOpen && (
-        <ClaimModal claim={editingClaim} onClose={() => setModalOpen(false)} onSaved={() => { setModalOpen(false); fetchClaims() }} />
+        <ClaimModal
+          claim={editingClaim}
+          onClose={() => setModalOpen(false)}
+          onSaved={() => { setModalOpen(false); fetchClaims() }}
+          existingClaims={claims}
+        />
       )}
     </div>
   )
