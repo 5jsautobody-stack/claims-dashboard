@@ -19,25 +19,7 @@ export async function POST(req: NextRequest) {
       ? { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64 } }
       : { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: base64 } }
 
-    const prompt = `You are reading an auto body / collision repair estimate document. Extract all available information and return ONLY a valid JSON object with these exact keys (use empty string "" for any field not found):
-
-{
-  "claim_num": "claim number or file number",
-  "vehicle": "year make model trim (e.g. 2021 Toyota Camry LE)",
-  "vin": "full VIN number",
-  "plate": "license plate number",
-  "insurance": "insurance company name",
-  "policy": "policy number",
-  "adjuster": "claims adjuster full name",
-  "adj_phone": "adjuster phone number",
-  "adj_email": "adjuster email address",
-  "customer": "vehicle owner full name and phone number",
-  "est_amount": "total estimate dollar amount (e.g. $4,250.00)",
-  "date_in": "date vehicle was received in YYYY-MM-DD format",
-  "notes": "brief summary of damage and work needed, 2-3 sentences max"
-}
-
-Return ONLY the JSON object. No markdown fences, no explanation, no extra text.`
+    const prompt = `You are reading an auto body repair estimate. Extract info and return ONLY valid JSON with these keys (empty string if not found): {"claim_num":"","vehicle":"","vin":"","plate":"","insurance":"","policy":"","adjuster":"","adj_phone":"","adj_email":"","customer":"","est_amount":"","date_in":"","notes":""}`
 
     const response = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -48,3 +30,32 @@ Return ONLY the JSON object. No markdown fences, no explanation, no extra text.`
       },
       body: JSON.stringify({
         model: 'claude-opus-4-5',
+        max_tokens: 1000,
+        messages: [
+          {
+            role: 'user',
+            content: [
+              contentBlock,
+              { type: 'text', text: prompt },
+            ],
+          },
+        ],
+      }),
+    })
+
+    if (!response.ok) {
+      const err = await response.json()
+      return NextResponse.json({ error: err.error?.message || 'API error' }, { status: 500 })
+    }
+
+    const data = await response.json()
+    const text = data.content?.find((b: { type: string }) => b.type === 'text')?.text || ''
+    const cleaned = text.replace(/```json|```/g, '').trim()
+    const parsed = JSON.parse(cleaned)
+
+    return NextResponse.json({ fields: parsed })
+  } catch (err) {
+    console.error('Parse estimate error:', err)
+    return NextResponse.json({ error: 'Failed to parse estimate' }, { status: 500 })
+  }
+}
