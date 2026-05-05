@@ -64,7 +64,7 @@ export default function ClaimsDashboard() {
             </div>
             <div>
               <h1 className="text-sm font-semibold text-gray-900">Claims Dashboard</h1>
-              <p className="text-xs text-gray-400 hidden sm:block">5JS Auto Body — shared shop view</p>
+              <p className="text-xs text-gray-400 hidden sm:block">5 J's Automotive — shared shop view</p>
             </div>
           </div>
           <button onClick={openNew} className="btn btn-primary text-xs sm:text-sm py-1.5 px-3 sm:py-2 sm:px-4">
