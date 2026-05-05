@@ -27,6 +27,17 @@ export type PaymentConfirmation = {
   timestamp: string
 }
 
+// Tracks each individual estimate / supplement amount separately
+export type EstimateLineItem = {
+  id: string
+  label: string        // e.g. "Original Estimate", "Supplement #1", "Supplement #2"
+  amount: string       // e.g. "$4,250.00"
+  date: string         // date of that document
+  file_name: string
+  file_url: string
+  timestamp: string    // when it was added to the system
+}
+
 export type Claim = {
   id: string
   claim_num: string
@@ -40,7 +51,7 @@ export type Claim = {
   adj_phone: string
   adj_email: string
   customer: string
-  est_amount: string
+  est_amount: string        // running total (auto-calculated)
   deductible: string
   paid: string
   date_in: string
@@ -56,6 +67,7 @@ export type Claim = {
   tow_company: string
   events_log: string        // JSON string of EventLog[]
   payments: string          // JSON string of PaymentConfirmation[]
+  estimate_lines: string    // JSON string of EstimateLineItem[]
   created_at: string
   updated_at: string
 }
